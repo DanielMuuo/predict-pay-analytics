@@ -1,134 +1,212 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from xgboost import XGBClassifier
-from sklearn.model_selection import train_test_split
-from imblearn.over_sampling import SMOTE
-import base64
 import re
+import joblib
+import shap
+import matplotlib.pyplot as plt
+from xgboost import XGBClassifier
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
+from sklearn.metrics import roc_auc_score
+from sklearn.calibration import CalibratedClassifierCV
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
 
-# -- ADVANCED CLEANING FROM YOUR PREDICTOR SCRIPT --
-def clean_currency(value):
+# =====================================================
+# Advanced Feature Engineering (Hardened for 7k Data)
+# =====================================================
+
+def clean_numeric(value):
+    """Handles KES prefixes, commas, and malformed numeric strings safely."""
     if pd.isna(value): return 0.0
+    if isinstance(value, (int, float)): return float(value)
     try:
-        value_str = str(value).strip().replace('KES', '').replace(',', '').strip()
+        value_str = str(value).replace("KES", "").replace(",", "").strip()
         match = re.search(r'[-+]?\d*\.?\d+', value_str)
         return float(match.group(0)) if match else 0.0
     except: return 0.0
 
-# -- PAGE CONFIG --
-st.set_page_config(page_title="Predict-Pay AI", layout="wide")
+def engineer_features(df):
+    # 1. Robust Cleaning for M-Shwari Columns
+    df["principal_cleaned"] = df["PRINCIPAL AMOUNT"].apply(clean_numeric)
+    df["balance_cleaned"] = df["BALANCE"].apply(clean_numeric)
+    df["amt_paid_cleaned"] = df["AMOUNT PAID"].apply(clean_numeric) if "AMOUNT PAID" in df.columns else 0.0
+    df["dpd_cleaned"] = pd.to_numeric(df["DPD"], errors="coerce").fillna(0)
+    df["loan_count"] = pd.to_numeric(df["LOANS COUNTER"], errors="coerce").fillna(0)
+
+    # 2. Behavioral Ratios (Daniel Muuo Logic)
+    # Exposure: How much of the original loan is still outstanding
+    df["exposure_ratio"] = df["balance_cleaned"] / (df["principal_cleaned"] + 1)
+    # Intensity: Number of loans relative to delinquency duration
+    df["loan_intensity"] = df["loan_count"] / (df["dpd_cleaned"] + 1)
+    # Velocity: Speed of delinquency
+    df["delinquency_velocity"] = df["dpd_cleaned"] / (df["loan_count"] + 1)
+    # Log transform to normalize skewed DPD distributions
+    df["log_dpd"] = np.log1p(df["dpd_cleaned"])
+    
+    # 3. Target Definition (The 'Will Pay' Label)
+    # Using actual payment history if available, else balance reduction
+    if "AMOUNT PAID" in df.columns:
+        df["target"] = (df["amt_paid_cleaned"] > 0).astype(int)
+    else:
+        df["target"] = (df["balance_cleaned"] < df["principal_cleaned"]).astype(int)
+        
+    return df
+
+# =====================================================
+# UI Setup & Subtle Branding
+# =====================================================
+
+st.set_page_config(page_title="Predict-Pay AI Enterprise", layout="wide")
 
 st.markdown("""
     <style>
-    .main { background-color: #f5f7f9; }
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #007bff; color: white; }
+    .main { background-color: #f8f9fa; }
+    .stButton>button { 
+        width: 100%; border-radius: 8px; height: 3.5em; 
+        background-color: #004a99; color: white; font-weight: bold; border: none;
+    }
+    .footer { position: fixed; bottom: 0; width: 100%; text-align: center; color: #6c757d; font-size: 11px; padding: 10px; background: white; border-top: 1px solid #dee2e6; }
     </style>
     """, unsafe_allow_html=True)
 
-st.title("Predict-Pay: Smart Collections Engine")
-st.write("Targeted Debt Recovery using XGBoost Machine Learning logic from Daniel Muuo.")
+st.title("Predict-Pay: Enterprise Recovery Engine")
+st.markdown("**Built by:** Daniel Muuo")
 
-# --- DATA REQUIREMENTS GUIDE (UPDATED) ---
-with st.expander("ℹ️ View CSV Data Requirements"):
+with st.expander("System Documentation & Data Requirements"):
+    st.markdown("### 1. Required CSV Columns")
     st.markdown("""
-    ### Required Columns (Exact Names Needed)
-    Ensure your CSV has the following headers for the AI to process correctly:
+    Ensure your CSV has these exact headers (Case Sensitive):
     
-    | Column Name | Data Type | Purpose |
-    | :--- | :--- | :--- |
-    | **CFID** | Number/ID | Unique Case File ID for system matching. |
-    | **IDENTIFICATION** | Number | Debtor's National ID or Passport. |
-    | **DEBTOR NAMES** | Text | Used for the final prioritized call list. |
-    | **PRINCIPAL AMOUNT** | Currency | Original loan amount. |
-    | **DPD** | Number | Days Past Due - a primary driver for prediction. |
-    | **LOANS COUNTER** | Number | Total previous loans - measures customer loyalty. |
-    | **BALANCE** | Currency | Current debt used to calculate repayment behavior. |
-    
-    *Tip: If your columns have different names, please rename them in Excel before uploading.*
+    | Column Name | Purpose |
+    | :--- | :--- |
+    | **CFID** | Unique Case ID |
+    | **DEBTOR NAMES** | Full Name for Call Lists |
+    | **PRINCIPAL AMOUNT** | Original loan value |
+    | **BALANCE** | Current outstanding amount |
+    | **DPD** | Days Past Due |
+    | **LOANS COUNTER** | Total previous loans |
+    | **AMOUNT PAID** | (Optional) Past payment history |
+    """)
+    st.divider()
+    st.markdown("### 2. Technical Methodology")
+    st.markdown("""
+    * **Calibration:** Isotonic (Large Data) or Sigmoid (Small Data).
+    * **Oversampling:** SMOTE is used to balance payment/non-payment classes.
+    * **Explainability:** SHAP TreeExplainer for feature attribution.
     """)
 
 st.divider()
 
-## Sidebar
-st.sidebar.header("Step 1: Data Input")
-upload_file = st.sidebar.file_uploader("Upload your CSV", type=["csv"])
+# =====================================================
+# Step 2: Controls & Data Ingestion
+# =====================================================
 
-st.sidebar.header("Step 2: Model Tuning")
-test_size = st.sidebar.slider("Validation Split (%)", 10, 50, 20)
+col_a, col_b = st.columns([2, 1])
+with col_a:
+    st.subheader("Data Ingestion")
+    upload_file = st.file_uploader("Upload csv file", type=["csv"])
+with col_b:
+    st.subheader("Engine Tuning")
+    test_size = st.slider("Validation Hold-out (%)", 10, 40, 20)
 
-## Main Logic
+# =====================================================
+# Step 3: Core Logic & Execution
+# =====================================================
+
+# Model Features
+features = ["principal_cleaned", "balance_cleaned", "dpd_cleaned", "loan_count", 
+            "exposure_ratio", "loan_intensity", "delinquency_velocity", "log_dpd"]
+
 if upload_file is not None:
-    df = pd.read_csv(upload_file)
+    df_raw = pd.read_csv(upload_file)
     
-    # Check for required columns including new identifiers
-    required = ['CFID', 'IDENTIFICATION', 'DEBTOR NAMES', 'PRINCIPAL AMOUNT', 'DPD', 'LOANS COUNTER', 'BALANCE']
-    missing = [col for col in required if col not in df.columns]
-    
+    # Validation
+    required = ["CFID", "DEBTOR NAMES", "PRINCIPAL AMOUNT", "DPD", "LOANS COUNTER", "BALANCE"]
+    missing = [c for c in required if c not in df_raw.columns]
     if missing:
-        st.error(f"❌ Missing columns: {', '.join(missing)}. Please check the guide above.")
-        st.stop()
-
-    # 1. Clean & Map Real Columns
-    df['principal_cleaned'] = df['PRINCIPAL AMOUNT'].apply(clean_currency)
-    df['dpd_cleaned'] = pd.to_numeric(df['DPD'], errors='coerce').fillna(0)
-    df['loan_count'] = pd.to_numeric(df['LOANS COUNTER'], errors='coerce').fillna(0)
-    df['balance_cleaned'] = df['BALANCE'].apply(clean_currency)
+        st.error(f"❌ Missing Columns: {', '.join(missing)}"); st.stop()
+        
+    df = engineer_features(df_raw)
     
-    # Target Variable logic
-    df['will_pay'] = (df['balance_cleaned'] < df['principal_cleaned']).astype(int)
+    # Select calibration method based on 7k data size
+    calib_method = 'isotonic' if len(df) > 1000 else 'sigmoid'
     
-    features = ['principal_cleaned', 'dpd_cleaned', 'loan_count']
-    # Preview with identifiers
-    st.write("### Live Data Preview", df[['CFID', 'IDENTIFICATION', 'DEBTOR NAMES'] + features].head(5))
+    st.success(f"Data Ingested: {len(df)} records. Logic: {calib_method.capitalize()} Calibration.")
 else:
-    st.warning("⬅️ Upload your csv file to start.")
-    # Fallback dummy data with identifiers
-    df = pd.DataFrame({
-        'CFID': [2951000 + i for i in range(200)],
-        'IDENTIFICATION': [12345678 + i for i in range(200)],
-        'DEBTOR NAMES': ['Sample Client ' + str(i) for i in range(200)],
-        'principal_cleaned': np.random.randint(5000, 100000, 200),
-        'dpd_cleaned': np.random.randint(1, 180, 200),
-        'loan_count': np.random.randint(1, 10, 200),
-        'will_pay': np.random.choice([0, 1], 200, p=[0.7, 0.3])
-    })
-    features = ['principal_cleaned', 'dpd_cleaned', 'loan_count']
+    st.info("Please upload your CSV file to begin.")
+    st.stop()
 
-if st.button("Execute Prediction Engine"):
-    X = df[features]
-    y = df['will_pay']
+if st.button("Run Recovery Prediction Engine"):
+    # Target Check
+    X, y = df[features], df["target"]
+    if len(np.unique(y)) < 2:
+        st.error("❌ The data has no variation in 'Paid' vs 'Unpaid' statuses. Cannot train model."); st.stop()
+
+    # Split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size/100, stratify=y, random_state=42)
+
+    # 1. Pipeline for Validation
+    pipeline = ImbPipeline([
+        ('smote', SMOTE(random_state=42)),
+        ('xgb', XGBClassifier(n_estimators=100, learning_rate=0.05, max_depth=4, eval_metric="logloss", random_state=42))
+    ])
     
-    if len(np.unique(y)) > 1:
-        sm = SMOTE(random_state=42)
-        X_res, y_res = sm.fit_resample(X, y)
-        X_train, X_test, y_train, y_test = train_test_split(X_res, y_res, test_size=test_size/100)
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+    cv_scores = cross_val_score(pipeline, X_train, y_train, cv=cv, scoring="roc_auc")
+
+    # 2. Calibrated Production Model
+    base_model = XGBClassifier(n_estimators=200, learning_rate=0.05, max_depth=5, eval_metric="logloss", random_state=42)
+    calibrated_model = CalibratedClassifierCV(base_model, method=calib_method, cv=cv)
+    
+    # SMOTE the training set
+    sm = SMOTE(random_state=42)
+    X_train_res, y_train_res = sm.fit_resample(X_train, y_train)
+    calibrated_model.fit(X_train_res, y_train_res)
+
+    # =====================================================
+    # Step 4: Enterprise Analytics Dashboard
+    # =====================================================
+    st.divider()
+    res_col1, res_col2 = st.columns(2)
+
+    with res_col1:
+        y_probs = calibrated_model.predict_proba(X_test)[:, 1]
+        st.metric("Model Confidence (AUC)", f"{roc_auc_score(y_test, y_probs):.3f}")
+        st.write(f"**CV Stability (Mean):** {cv_scores.mean():.3f}")
         
-        model = XGBClassifier(n_estimators=100, learning_rate=0.1)
-        model.fit(X_train, y_train)
+        # Drivers from the first calibrated estimator
+        importance_vals = calibrated_model.calibrated_classifiers_[0].estimator.feature_importances_
+        importance_df = pd.DataFrame({"Feature": features, "Weight": importance_vals}).sort_values("Weight", ascending=False)
+        st.write("### Portfolio Risk Drivers")
+        st.bar_chart(importance_df.set_index("Feature"))
+
+    with res_col2:
+        st.write("###Priority Recovery List")
+        # Global Probability
+        df["Recovery_Probability"] = (calibrated_model.predict_proba(df[features])[:, 1] * 100).round(2)
         
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Model Accuracy", f"{model.score(X_test, y_test):.2%}")
-            importance = pd.DataFrame({'Driver': features, 'Weight': model.feature_importances_}).sort_values('Weight', ascending=False)
-            st.write("### Decision Drivers")
-            st.bar_chart(importance.set_index('Driver'))
-            
-        with col2:
-            st.write("### Collection Priority List")
-            probs = model.predict_proba(X)[:, 1]
-            df['Recovery_Probability'] = (probs * 100).round(2)
-            
-            # UPDATED: Included CFID and IDENTIFICATION in display and export
-            display_cols = ['CFID', 'IDENTIFICATION', 'DEBTOR NAMES', 'principal_cleaned', 'Recovery_Probability']
-            st.dataframe(df[display_cols].sort_values('Recovery_Probability', ascending=False))
-            
-            csv = df[display_cols].sort_values('Recovery_Probability', ascending=False).to_csv(index=False)
-            st.download_button(
-                label="Download Priority List",
-                data=csv,
-                file_name="mshwari_priority_list.csv",
-                mime="text/csv",
-            )
-    else:
-        st.error("Not enough data variety in the uploaded file to train the AI.")
+        # Rank by probability - filtering out those who have already paid
+        ranking = df[df["target"] == 0][["CFID", "DEBTOR NAMES", "Recovery_Probability", "BALANCE"]].sort_values("Recovery_Probability", ascending=False)
+        
+        st.dataframe(ranking, use_container_width=True)
+        st.download_button("Export Results", ranking.to_csv(index=False), "Recovery_List.csv")
+
+    # SHAP Explainability
+    st.divider()
+    st.subheader("Case-Level Transparency (SHAP)")
+    explainer = shap.TreeExplainer(calibrated_model.calibrated_classifiers_[0].estimator)
+    shap_values = explainer(X_test)
+    plt.figure(figsize=(10, 6))
+    shap.plots.bar(shap_values, show=False)
+    st.pyplot(plt.gcf(), bbox_inches='tight'); plt.clf()
+
+    # Model Persistence
+    joblib.dump({
+        "model_object": calibrated_model,
+        "feature_columns": features,
+        "metadata": {"author": "Daniel Muuo", "version": "3.2", "samples": len(df)}
+    }, "predict_pay.pkl")
+    st.success("Model Persisted: predict_pay_pkl")
+
+st.markdown("<div class='footer'>Predict-Pay Enterprise v3.2 | Built by Daniel Muuo for M-Shwari Analysis</div>", unsafe_allow_html=True)
