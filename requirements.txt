@@ -4,3 +4,6 @@ numpy
 xgboost
 scikit-learn
 imbalanced-learn
+matplotlib
+shap
+joblib
