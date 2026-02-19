@@ -2,6 +2,7 @@
 
 ## Live Demo
 [Click here to view the Live Web App](https://predict-pay-analytics-hd8nw36wzwxxopdzhsgdun.streamlit.app/)
+
 ### Quick Start / Testing
 Don't have a dataset? [Download this sample_data.csv](sample_data.csv) to test the above engine.
 
@@ -10,11 +11,11 @@ In high-volume debt collection, the primary challenge is **resource allocation**
 
 ## Key Features
 - **Predictive Scoring:** Uses an XGBoost Classifier to assign a 0-100% repayment probability to each account.
+- **Calibration:** Uses Isotonic/Sigmoid calibration to ensure scores (0-100%) reflect real-world recovery likelihood.
+- **Explainable AI (SHAP):** Visualizes case-level transparency to show exactly why a debtor received a specific score.
 - **Handling Data Imbalance:** Implements **SMOTE** (Synthetic Minority Over-sampling Technique) to ensure the model learns effectively even if "paid" records are rare.
 - **Dynamic Dashboard:** A Streamlit interface that allows managers to upload CSV files and get instant priority lists.
 - **Automated Feature Importance:** Visualizes which factors (e.g., Loan Amount vs. Days Past Due) are driving repayment behavior.
-
-
 
 ## Tech Stack
 ![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)
@@ -27,6 +28,5 @@ In high-volume debt collection, the primary challenge is **resource allocation**
 ├── app.py              # Main Streamlit Web Application
 ├── requirements.txt    # Production Dependencies
 ├── LICENSE             # MIT License
-├── sample_data.csv     # Sample dataset for testing
+├── sample_data.csv     # Sample dataset for testing (New)
 └── README.md           # Project Documentation
-
