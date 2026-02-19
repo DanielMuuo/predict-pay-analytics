@@ -2,6 +2,8 @@
 
 ## Live Demo
 [Click here to view the Live Web App](https://predict-pay-analytics-hd8nw36wzwxxopdzhsgdun.streamlit.app/)
+### Quick Start / Testing
+Don't have a dataset? [Download this sample_data.csv](sample_data.csv) to test the engine immediately.
 
 ## Business Overview
 In high-volume debt collection, the primary challenge is **resource allocation**. Calling every debtor is inefficient. This project provides a data-driven solution to identify "High-Propensity" debtors, allowing teams to focus efforts where recovery is most likely.
@@ -27,3 +29,4 @@ In high-volume debt collection, the primary challenge is **resource allocation**
 ├── LICENSE             # MIT License
 
 └── README.md           # Project Documentation
+
