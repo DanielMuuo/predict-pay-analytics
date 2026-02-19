@@ -125,7 +125,7 @@ if st.button("Execute Prediction Engine"):
             
             csv = df[display_cols].sort_values('Recovery_Probability', ascending=False).to_csv(index=False)
             st.download_button(
-                label="Download Priority List for Field Team",
+                label="Download Priority List",
                 data=csv,
                 file_name="mshwari_priority_list.csv",
                 mime="text/csv",
